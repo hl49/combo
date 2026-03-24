@@ -1,0 +1,9 @@
+defaults:
+  - trainer: default
+  - data: vtab_cifar100
+  - backbone: in21k
+  - adapter: combo
+  - regularization: default
+  - scheduler: linear_warmup_cosine
+  - optimizer: adamw
+  - training: default

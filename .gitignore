@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Training outputs
+outputs/
+logs/
+wandb/
+cached_features/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Hydra outputs
+multirun/

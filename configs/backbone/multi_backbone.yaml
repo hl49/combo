@@ -1,0 +1,41 @@
+# Top-level parameters control the COMBINED features
+target_grid_size: [14, 14]
+name: "radio_teachers"        # Name for the combined backbone
+cls_token_strategy: "spatial_only"  # Strategy for handling cls tokens
+use_layernorm: embed_and_tokens
+use_norm2_outputs: false
+drop_path_rate: 0.0  # Whether to use norm2 outputs for combined features
+
+# Individual backbone configurations
+backbones:
+  - name: "sam"  
+    model_path: "timm/samvit_base_patch16.sa1b"  
+    target_grid_size: ${backbone.target_grid_size}  # Reference top-level
+    cls_token_strategy: "spatial_only"
+    use_layernorm: ${backbone.use_layernorm}  # Reference top-level
+    use_norm2_outputs: ${backbone.use_norm2_outputs}  # Reference top-level
+    init_last_norm_from_pretrained: false
+
+  - name: "dfn_clip"  
+    model_path: "timm/vit_base_patch16_clip_224.dfn2b"  
+    target_grid_size: ${backbone.target_grid_size}  # Reference top-level
+    cls_token_strategy: "spatial_only"
+    use_layernorm: ${backbone.use_layernorm}  # Reference top-level
+    use_norm2_outputs: ${backbone.use_norm2_outputs}  # Reference top-level
+    init_last_norm_from_pretrained: false
+
+  - name: "siglip"  
+    model_path: "timm/vit_base_patch16_siglip_224.webli"  
+    target_grid_size: ${backbone.target_grid_size}  # Reference top-level
+    cls_token_strategy: "spatial_only"
+    use_layernorm: ${backbone.use_layernorm}  # Reference top-level
+    use_norm2_outputs: ${backbone.use_norm2_outputs}  # Reference top-level
+    init_last_norm_from_pretrained: false
+
+  - name: "dinov2"  
+    model_path: "timm/vit_base_patch14_reg4_dinov2.lvd142m"  
+    target_grid_size: ${backbone.target_grid_size}  # Reference top-level
+    cls_token_strategy: "spatial_only"
+    use_layernorm: ${backbone.use_layernorm}  # Reference top-level
+    use_norm2_outputs: ${backbone.use_norm2_outputs}  # Reference top-level
+    init_last_norm_from_pretrained: false

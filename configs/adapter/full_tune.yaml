@@ -1,0 +1,7 @@
+type: full_tune
+freeze_backbone: false
+params:
+  token_pooling: "cls_concat"  # Options: "cls", "cls_average", "cls_concat", "avg", "map_all_tokens", "map_spatial_tokens"
+  use_norm2_outputs: false
+  dropout_rate: 0.0
+  map_num_heads: 12 # Ony used for "map" pooling

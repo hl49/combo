@@ -1,0 +1,11 @@
+type: lora
+freeze_backbone: true
+params:
+  rank: 32
+  alpha: 8
+  dropout: 0.0
+  target_modules: ["attn.qkv", "attn.proj", "mlp.fc1", "mlp.fc2"]
+  modules_to_save: ["head"]
+  token_pooling: "cls_concat"  # Options: "cls", "cls_average", "cls_concat", "avg",  "map_all_tokens", "map_spatial_tokens"
+  map_num_heads: 12 # Ony used for "map" pooling
+  patch_drop_rate: 0.0

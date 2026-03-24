@@ -1,0 +1,13 @@
+type: combo
+freeze_backbone: true
+params:
+  layers_to_keep: null
+  embed_dim: 128
+  depth: 6
+  num_heads: 2
+  mlp_ratio: 4.0
+  token_pooling: "cls"  # "cls", "avg", "map"
+  patch_drop_rate: 0.0
+  drop_path_rate: 0.0
+  layer_drop_rate: 0.0
+  rescale_after_layer_drop: true

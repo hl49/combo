@@ -1,0 +1,8 @@
+model_path: "timm/vit_base_patch16_siglip_224.webli"
+name: "siglip"
+target_grid_size: null
+cls_token_strategy: "spatial_only"  # Replace expected_num_cls_tokens
+use_layernorm: embed_and_tokens
+use_norm2_outputs: false
+drop_path_rate: 0.0
+init_last_norm_from_pretrained: false

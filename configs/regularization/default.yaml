@@ -1,0 +1,5 @@
+l1_loss_scale: 0.0
+l2_loss_scale: 0.0
+gl_loss_scale: 0.0
+struct_loss_scale: 0.0
+model_loss_scale: 0.0

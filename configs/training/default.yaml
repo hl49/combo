@@ -1,0 +1,7 @@
+# Training settings
+max_epochs: null
+min_epochs: null
+max_steps: 1300 # Use this rather than epochs because of how the scheduler is managed. This is meant to be 100 epochs for batch size of 64 and 800 training samples. For the 1000 train+val training samples, use 1600.
+min_steps: null
+max_time: null
+log_gradients: false

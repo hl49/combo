@@ -1,0 +1,8 @@
+type: adapter_plus
+freeze_backbone: true
+params:
+  config: post
+  dim: 16
+  dropout: 0.0
+  drop_path: 0.1
+  token_pooling: "cls_concat"  # Options: "cls", "cls_average", "cls_concat", "avg",  "map_all_tokens", "map_spatial_tokens"

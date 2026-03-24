@@ -1,0 +1,5 @@
+name: linear_warmup_cosine
+warmup_steps: 0.1  # 10% of max_steps
+max_steps: ${training.max_steps}
+warmup_start_lr_factor: 100 # to divide original lr
+eta_min_factor: 1000 # to divide original lr
