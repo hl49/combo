@@ -11,6 +11,7 @@ from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from torchmetrics import Accuracy
 
 from .adapter_loader import load_adapter
+from pathlib import Path
 
 
 def get_model(config):
@@ -47,6 +48,32 @@ class ImageClassificationLightningModule(pl.LightningModule):
         self.gl_loss_scale = reg.get("gl_loss_scale", 0.0)
         self.struct_loss_scale = reg.get("struct_loss_scale", 0.0)
         self.model_loss_scale = reg.get("model_loss_scale", 0.0)
+        
+        # Pruning / saliency config
+        # pruning = config.model.pruning
+        pruning = config.get("pruning", {})
+        # self.output_path = Path(pruning.get("output_path", "outputs"))
+        output_dir = Path(pruning.get("output_path", "outputs"))
+        dataset_name = config.data.dataset_name.split("/")[-1]
+        seed = config.trainer.seed_everything
+        self.output_path = output_dir / f'{dataset_name}_seed_{seed}.csv'
+        self.warmup_iters = int(pruning.get("warmup_iters", 0.2) * config.training.max_steps)
+        self.min_alive = pruning.get("min_alive", 4)
+        self.ema_momentum = pruning.get("ema_momentum", 0.9)
+        self.log_interval = pruning.get("log_interval", 5)
+
+        # Access model's modules
+        self._conv = self.model.feat_transformer.patch_embed.proj
+        ch_in = self.model.feat_transformer.in_chans
+        self.saliency_ema = torch.zeros(ch_in)
+        self._captured_conv_grad = None
+        def _capture_conv_grad(grad):
+            self._captured_conv_grad = grad.detach().clone()
+        self._conv.weight.register_hook(_capture_conv_grad)
+        
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.output_path, 'w') as f:
+            f.write('iter,source,ch_idx,saliency,ema_saliency,grad_mag,weight_mag\n')
 
     def forward(self, x):
         return self.model(x)
@@ -97,6 +124,36 @@ class ImageClassificationLightningModule(pl.LightningModule):
             )
 
         return total_loss
+    
+    def on_after_backward(self) -> None:
+        if self._captured_conv_grad is not None:
+            # Update EMA of saliency scores
+            with torch.no_grad():
+                w = self._conv.weight.detach().cpu()
+                gw = self._captured_conv_grad.cpu()
+                saliency = (gw * w).pow(2).sum(dim=[0, 2, 3])   # [48]
+                self.saliency_ema = (
+                    self.ema_momentum * self.saliency_ema
+                    + (1 - self.ema_momentum) * saliency
+                )
+        
+        if self.global_step % self.log_interval == 0 and self._captured_conv_grad is not None:
+            with open(self.output_path, 'a') as f:
+                with torch.no_grad():
+                    w  = self._conv.weight.detach().cpu()
+                    gw = self._captured_conv_grad.cpu()
+                    saliency_c = (gw * w).pow(2).sum(dim=[0, 2, 3])
+                    grad_mag   = gw.pow(2).sum(dim=[0, 2, 3])
+                    weight_mag = w.pow(2).sum(dim=[0, 2, 3])
+                    for ch in range(len(saliency_c)):
+                        f.write(
+                            f'{self.global_step},conv,{ch},'
+                            f'{saliency_c[ch].item():.6e},'
+                            f'{self.saliency_ema[ch].item():.6e},'
+                            f'{grad_mag[ch].item():.6e},'
+                            f'{weight_mag[ch].item():.6e}\n'
+                        )
+
 
     def validation_step(self, batch, batch_idx):
         x, y = batch["x"], batch["y"]

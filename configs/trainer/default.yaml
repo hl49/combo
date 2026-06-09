@@ -4,7 +4,7 @@ accelerator: auto
 strategy: auto
 devices: auto
 num_nodes: 1
-precision: bf16-mixed
+precision: 16-mixed
 logger:
   class_path: lightning.pytorch.loggers.WandbLogger
   name: combo_run
@@ -37,8 +37,8 @@ enable_model_summary: null
 accumulate_grad_batches: 1
 gradient_clip_val: null
 gradient_clip_algorithm: null
-deterministic: null
-benchmark: null
+deterministic: true
+benchmark: false
 inference_mode: true
 use_distributed_sampler: true
 profiler: null

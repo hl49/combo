@@ -27,7 +27,7 @@ import lightning as L
 import lightning.pytorch.callbacks as pl_callbacks
 import torch
 from lightning.pytorch.loggers import WandbLogger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from data.vtab_datamodule import VTABDataModule
 from models.image_classification_module import ImageClassificationLightningModule
@@ -92,13 +92,21 @@ def train(cfg):
 
     L.seed_everything(cfg.trainer.seed_everything)
 
+    logger = get_logger(cfg)
+
+    logger.experiment.config.update(
+    OmegaConf.to_container(cfg, resolve=True),
+    allow_val_change=True,
+        )
+
     trainer = L.Trainer(
         accelerator=cfg.trainer.accelerator,
         strategy=cfg.trainer.strategy,
         devices=cfg.trainer.devices,
         num_nodes=cfg.trainer.num_nodes,
         precision=cfg.trainer.precision,
-        logger=get_logger(cfg),
+        # logger=get_logger(cfg),
+        logger=logger,
         callbacks=get_callbacks(cfg),
         max_epochs=cfg.training.max_epochs,
         min_epochs=cfg.training.min_epochs,

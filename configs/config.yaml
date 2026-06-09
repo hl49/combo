@@ -7,3 +7,4 @@ defaults:
   - scheduler: linear_warmup_cosine
   - optimizer: adamw
   - training: default
+  - pruning: default

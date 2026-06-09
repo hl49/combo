@@ -151,6 +151,35 @@ class TimmVisionTransformerBackbone(BaseVisionTransformerBackbone):
 
         return feature_map, cls_tokens
 
+    # def _get_raw_block_outputs(
+    #     self, x: torch.Tensor
+    # ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    #     """Get raw outputs from each transformer block."""
+    #     x = self._normalize_input(x)
+    #     has_prefix = self.num_prefix_tokens > 0
+
+    #     with torch.no_grad():
+            
+    #         intermediates = self._model.forward_intermediates(
+    #             x,
+    #             indices=None,        # capture all blocks
+    #             norm=False,          # raw pre-norm outputs
+    #             stop_early=False,
+    #             output_fmt='NCHW',    # keep (B, seq_len, dim) — no NCHW reshape
+    #             intermediates_only=True,     # only return intermediates, not final output
+    #             **({'return_prefix_tokens': True} if has_prefix else {}),  # include prefix tokens in output
+    #         )
+            
+    #         outputs = []
+    #         for intem in intermediates:
+    #             if has_prefix:
+    #                 intermediate, prefix = intem
+    #             else:
+    #                 intermediate, prefix = intem, None
+    #             outputs.append((intermediate, prefix))
+
+    #         return outputs
+
     def _get_raw_block_outputs(
         self, x: torch.Tensor
     ) -> List[Tuple[torch.Tensor, torch.Tensor]]:

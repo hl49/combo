@@ -11,7 +11,7 @@ from .adapters.adapter_plus import AdapterPlusAdapter
 from .adapters.combo import ComBoAdapter
 from .adapters.full_tune import FullTuneAdapter
 from .adapters.linear_probe import LinearProbeAdapter
-from .adapters.lora import LoRAAdapter
+# from .adapters.lora import LoRAAdapter
 from .backbones.combined_backbones import CombinedBackbone
 from .backbones.timm_vit import TimmVisionTransformerBackbone
 
@@ -88,7 +88,7 @@ def load_adapter(adapter_config, backbone_config, num_classes: int):
         "combo": ComBoAdapter,
         "linear_probe": LinearProbeAdapter,
         "full_tune": FullTuneAdapter,
-        "lora": LoRAAdapter,
+        # "lora": LoRAAdapter,
         "adapter_plus": AdapterPlusAdapter,
     }
 
