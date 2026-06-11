@@ -60,7 +60,7 @@ class ImageClassificationLightningModule(pl.LightningModule):
         self.warmup_iters = int(pruning.get("warmup_iters", 0.2) * config.training.max_steps)
         self.min_alive = pruning.get("min_alive", 4)
         self.ema_momentum = pruning.get("ema_momentum", 0.9)
-        self.log_interval = pruning.get("log_interval", 5)
+        self.log_interval = int(pruning.get("log_interval", 5))
 
         # Access model's modules
         self._conv = self.model.feat_transformer.patch_embed.proj
@@ -124,35 +124,80 @@ class ImageClassificationLightningModule(pl.LightningModule):
             )
 
         return total_loss
-    
-    def on_after_backward(self) -> None:
-        if self._captured_conv_grad is not None:
-            # Update EMA of saliency scores
-            with torch.no_grad():
-                w = self._conv.weight.detach().cpu()
-                gw = self._captured_conv_grad.cpu()
-                saliency = (gw * w).pow(2).sum(dim=[0, 2, 3])   # [48]
-                self.saliency_ema = (
-                    self.ema_momentum * self.saliency_ema
-                    + (1 - self.ema_momentum) * saliency
-                )
+
+    def on_before_optimizer_step(self, optimizer) -> None:
+        # Update EMA of saliency scores
+        with torch.no_grad():
+            w = self._conv.weight.detach().cpu()
+            # gw = self._captured_conv_grad.cpu()
+            gw = self._conv.weight.grad.detach().cpu()
+            gw = torch.nan_to_num(gw, nan=0.0, posinf=0.0, neginf=0.0)
+            saliency = (gw * w).pow(2).sum(dim=[0, 2, 3])   # [48]
+            self.saliency_ema = (
+                self.ema_momentum * self.saliency_ema
+                + (1 - self.ema_momentum) * saliency
+            )
+            # finite_mask = torch.isfinite(saliency)
+            # self.saliency_ema[finite_mask] = (
+            #     self.ema_momentum * self.saliency_ema[finite_mask]
+            #     + (1 - self.ema_momentum) * saliency[finite_mask]
+            # )
         
-        if self.global_step % self.log_interval == 0 and self._captured_conv_grad is not None:
+        if self.global_step % self.log_interval == 0:
+            # ema_log = {
+            #     f"saliency_ema/ch_{ch:02d}": self.saliency_ema[ch].item()
+            #     for ch in range(len(self.saliency_ema))
+            # }
+            self.logger.experiment.log({
+                **{
+                    f"saliency_ema/ch_{ch:02d}": self.saliency_ema[ch].item()
+                    for ch in range(len(self.saliency_ema))
+                },
+                "trainer/global_step": self.global_step,
+            })
+
+            # self.log_dict(ema_log, on_step=True)
             with open(self.output_path, 'a') as f:
                 with torch.no_grad():
-                    w  = self._conv.weight.detach().cpu()
-                    gw = self._captured_conv_grad.cpu()
-                    saliency_c = (gw * w).pow(2).sum(dim=[0, 2, 3])
                     grad_mag   = gw.pow(2).sum(dim=[0, 2, 3])
                     weight_mag = w.pow(2).sum(dim=[0, 2, 3])
-                    for ch in range(len(saliency_c)):
+                    for ch in range(len(saliency)):
                         f.write(
                             f'{self.global_step},conv,{ch},'
-                            f'{saliency_c[ch].item():.6e},'
+                            f'{saliency[ch].item():.6e},'
                             f'{self.saliency_ema[ch].item():.6e},'
                             f'{grad_mag[ch].item():.6e},'
                             f'{weight_mag[ch].item():.6e}\n'
                         )
+
+    # def on_after_backward(self) -> None:
+    #     if self._captured_conv_grad is not None:
+    #         # Update EMA of saliency scores
+    #         with torch.no_grad():
+    #             w = self._conv.weight.detach().cpu()
+    #             gw = self._captured_conv_grad.cpu()
+    #             saliency = (gw * w).pow(2).sum(dim=[0, 2, 3])   # [48]
+    #             self.saliency_ema = (
+    #                 self.ema_momentum * self.saliency_ema
+    #                 + (1 - self.ema_momentum) * saliency
+    #             )
+        
+    #     if self.global_step % self.log_interval == 0 and self._captured_conv_grad is not None:
+    #         with open(self.output_path, 'a') as f:
+    #             with torch.no_grad():
+    #                 # w  = self._conv.weight.detach().cpu()
+    #                 # gw = self._captured_conv_grad.cpu()
+    #                 # saliency_c = (gw * w).pow(2).sum(dim=[0, 2, 3])
+    #                 grad_mag   = gw.pow(2).sum(dim=[0, 2, 3])
+    #                 weight_mag = w.pow(2).sum(dim=[0, 2, 3])
+    #                 for ch in range(len(saliency)):
+    #                     f.write(
+    #                         f'{self.global_step},conv,{ch},'
+    #                         f'{saliency[ch].item():.6e},'
+    #                         f'{self.saliency_ema[ch].item():.6e},'
+    #                         f'{grad_mag[ch].item():.6e},'
+    #                         f'{weight_mag[ch].item():.6e}\n'
+    #                     )
 
 
     def validation_step(self, batch, batch_idx):

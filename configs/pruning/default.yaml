@@ -1,6 +1,6 @@
 name: saliency
 log_interval: 5
-output_path: outputs
+output_path: outputs/pruning
 warmup_iters: 0.2
 min_alive: 4
 ema_momentum: 0.9
