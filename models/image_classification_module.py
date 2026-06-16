@@ -12,6 +12,7 @@ from torchmetrics import Accuracy
 
 from .adapter_loader import load_adapter
 from pathlib import Path
+from typing import Any
 
 
 def get_model(config):
@@ -59,17 +60,35 @@ class ImageClassificationLightningModule(pl.LightningModule):
         self.output_path = output_dir / f'{dataset_name}_seed_{seed}.csv'
         self.warmup_iters = int(pruning.get("warmup_iters", 0.2) * config.training.max_steps)
         self.min_alive = pruning.get("min_alive", 4)
+        max_group = pruning.get("max_group", 1)
         self.ema_momentum = pruning.get("ema_momentum", 0.9)
         self.log_interval = int(pruning.get("log_interval", 5))
+        self.criteria = pruning.get("criteria", "ratio")
+        assert self.criteria in ['group', 'ratio', 'greedy'], "criteria must be one of ['group', 'ratio', 'greedy']"
+        self.backbone_slices = {
+            "fm_0": slice(0, 12),
+            "backbone_1": slice(12, 24),
+            "backbone_2": slice(24, 36),
+            "backbone_3": slice(36, 48),
+        }
+        self.slots = {f"backbone_{i}": max_group for i in range(len(self.backbone_slices.keys()))}
+        self._pruned = False
+        self.topk_idx=[]
 
         # Access model's modules
-        self._conv = self.model.feat_transformer.patch_embed.proj
+        self._proj = self.model.feat_transformer.patch_embed.proj
+        # self._conv = self.model.feat_transformer.patch_embed.proj
+        self._conv = getattr(self._proj, "conv", self._proj)
         ch_in = self.model.feat_transformer.in_chans
-        self.saliency_ema = torch.zeros(ch_in)
+        self.saliency_ema = torch.zeros(ch_in, dtype=torch.float64)
         self._captured_conv_grad = None
         def _capture_conv_grad(grad):
             self._captured_conv_grad = grad.detach().clone()
         self._conv.weight.register_hook(_capture_conv_grad)
+        # for name, module in self.model.feat_transformer.named_modules():
+        #     if name.startswith("conv"):
+        #         print(name, module)
+        #         break
         
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.output_path, 'w') as f:
@@ -79,6 +98,9 @@ class ImageClassificationLightningModule(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
+        if self.global_step == self.warmup_iters: 
+            self._apply_pruning()
+            # 
         x, y = batch["x"], batch["y"]
 
         outputs = self.model(x)
@@ -128,9 +150,9 @@ class ImageClassificationLightningModule(pl.LightningModule):
     def on_before_optimizer_step(self, optimizer) -> None:
         # Update EMA of saliency scores
         with torch.no_grad():
-            w = self._conv.weight.detach().cpu()
+            w = self._conv.weight.detach().clone().cpu().double()
             # gw = self._captured_conv_grad.cpu()
-            gw = self._conv.weight.grad.detach().cpu()
+            gw = self._conv.weight.grad.detach().clone().cpu().double()
             gw = torch.nan_to_num(gw, nan=0.0, posinf=0.0, neginf=0.0)
             saliency = (gw * w).pow(2).sum(dim=[0, 2, 3])   # [48]
             self.saliency_ema = (
@@ -169,6 +191,117 @@ class ImageClassificationLightningModule(pl.LightningModule):
                             f'{grad_mag[ch].item():.6e},'
                             f'{weight_mag[ch].item():.6e}\n'
                         )
+
+    def _compute_ratio_slots(self):
+        """
+        Allocate min_alive slots across backbones proportional to their
+        cumulative saliency. Uses largest-remainder to guarantee exact sum.
+        Backbones with low saliency may receive 0 slots and be fully pruned.
+        """
+        total_saliency = self.saliency_ema.sum().item()
+        slots          = {}
+        remainders     = {}
+        ratio_list     = []
+
+        for name, slc in self.backbone_slices.items():
+            group_sal        = self.saliency_ema[slc].sum().item()
+            ratio            = group_sal / (total_saliency + 1e-40)
+            exact            = ratio * self.min_alive
+            slots[name]      = int(exact)
+            remainders[name] = exact - slots[name]
+            ratio_list.append(round(ratio, 3))
+
+        # runner.logger.info(
+        #     f'[{self._tag()}] exact slots: {exact_list}'
+        # )
+
+        # # Distribute remaining slots to groups with largest remainders
+        allocated = sum(slots.values())
+        remaining = self.min_alive - allocated
+        for name in sorted(remainders, key=remainders.get, reverse=True):
+            if remaining <= 0:
+                break
+            slots[name] += 1
+            remaining   -= 1
+
+        return slots, ratio_list
+
+
+    # def on_train_batch_end(self, outputs, batch: Any, batch_idx: int) -> None:
+    def _apply_pruning(self) -> None:
+        self.topk_idx = []
+
+        if self.criteria == 'ratio':
+            self.slots, ratio_list = self._compute_ratio_slots()
+            msg = (f"[SaliencyPruning] step={self.global_step}, "
+            f"slots={self.slots}, ratios={ratio_list}, total={sum(self.slots.values())}")
+            self.logger.experiment.log({
+                "pruning/summary": msg,
+                "pruning/total_alive": sum(self.slots.values()),
+                "trainer/pruning_step": self.global_step,
+            })
+            print(f"[INFO]: {msg}")
+
+        if self.criteria in ('group', 'ratio'):
+            # Both use slot-constrained greedy selection
+            remaining_slots = dict(self.slots)   # copy — will be decremented
+            top_idx         = torch.argsort(self.saliency_ema, descending=True)
+
+            for ch in top_idx:
+                backbone_idx  = int(ch.item() // 12)
+                backbone_name = f"backbone_{backbone_idx}"
+                if remaining_slots.get(backbone_name, 0) > 0:
+                    self.topk_idx.append(ch.item())
+                    remaining_slots[backbone_name] -= 1
+                if len(self.topk_idx) >= self.min_alive:
+                    break
+                
+        elif self.criteria == 'greedy':
+            top_idx = torch.argsort(self.saliency_ema, descending=True)
+            self.topk_idx = top_idx[:self.min_alive].tolist()
+
+        prune_mask = torch.ones(len(self.saliency_ema), dtype=torch.bool)
+        prune_mask[self.topk_idx] = False
+        self._prune_mask = prune_mask.to(self._conv.weight.device)
+        self.saliency_ema[self._prune_mask.cpu()] = 0.0  # zero out pruned channels in EMA for logging
+
+        # Set gates to 0
+        with torch.no_grad():
+            self._conv.weight[:, self._prune_mask,:,:] = 0.0
+
+        def _zero_pruned_grads(grad):
+            grad[:, self._prune_mask, :, :] = 0.0
+            return grad
+        self._conv.weight.register_hook(_zero_pruned_grads)
+        
+        self.logger.experiment.log({
+                "pruning/topk": self.topk_idx})
+        print(f"[INFO]: pruning/topk: {self.topk_idx}")
+        # # Reset optimizer momentum for pruned channels so they can't drift back
+        # optimizer = runner.optim_wrapper.optimizer
+        # for group in optimizer.param_groups:
+        #     for p in group['params']:
+        #         if p is self._proj.gate_logits and p in optimizer.state:
+        #             state = optimizer.state[p]
+        #             if 'exp_avg' in state:
+        #                 state['exp_avg'][self._prune_mask] = 0.0
+        #             if 'exp_avg_sq' in state:
+        #                 state['exp_avg_sq'][self._prune_mask] = 0.0
+
+        # # Register grad hook to permanently zero pruned grads every backward
+        # def _zero_pruned_grads(grad):
+        #     grad[self._prune_mask] = 0.0
+        #     return grad
+        # self._proj.gate_logits.register_hook(_zero_pruned_grads)
+
+        # self._pruned = True
+        # runner.logger.info(
+        #     f'[{self._tag()}] Iter {runner.iter}: pruned — '
+        #     f'keeping channels {sorted(self.topk_idx)}'
+        # )
+        # runner.logger.info(
+        #     f'[{self._tag()}] Channel order: {top_idx}'
+        # )
 
     # def on_after_backward(self) -> None:
     #     if self._captured_conv_grad is not None:

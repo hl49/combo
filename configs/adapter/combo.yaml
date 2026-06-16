@@ -11,3 +11,4 @@ params:
   drop_path_rate: 0.0
   layer_drop_rate: 0.0
   rescale_after_layer_drop: true
+  sigmoid_gates: false

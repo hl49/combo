@@ -37,8 +37,8 @@ enable_model_summary: null
 accumulate_grad_batches: 1
 gradient_clip_val: null
 gradient_clip_algorithm: null
-deterministic: true
-benchmark: false
+deterministic: null
+benchmark: null
 inference_mode: true
 use_distributed_sampler: true
 profiler: null

@@ -2,10 +2,113 @@ import random
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.nn as nn
 from timm.models.vision_transformer import VisionTransformer
 
 from ..backbones.backbones_base import BaseVisionTransformerBackbone
 from .adapter_base import BaseAdapter
+
+class MaskedConv2d(torch.nn.Module):
+    """
+    Conv2d with hierarchical gating:
+      - model-level gates (one per input channel / model)
+      - channel-level gates (fine-grained)
+    """
+
+    def __init__(
+            self,
+            conv: torch.nn.Conv2d, 
+            activation_gates: str = "sigmoid",
+            model_level: bool = False,
+            num_models: int = 4,
+            tau: float = 1.0,
+            hardsoft_gates: bool = False,
+            hard_threshold: float = 0.0,
+            greedy_pruning: bool = False,
+            min_alive: int = 1,
+            group_pruning: bool = False,
+        ):
+        super().__init__()
+        self.model_level = model_level
+        self.num_models = num_models
+        self.conv = conv
+        self.ch_per_model = conv.in_channels // num_models if model_level else conv.in_channels
+        in_channels = self.num_models if self.model_level else conv.in_channels
+        self.tau = tau
+        self.hardsoft_gates = hardsoft_gates
+        self.hard_threshold = hard_threshold
+        self.greedy_pruning = greedy_pruning
+        self.min_alive = min_alive
+        self.group_pruning = group_pruning
+        # if group_pruning and not model_level:
+        #     self.ch_per_model = conv.in_channels // num_models
+            
+        if activation_gates not in ["sigmoid", "relu"]:
+            raise ValueError(f"Unsupported activation_gates: {activation_gates}")
+        
+        if activation_gates == "sigmoid":
+            self.gate_logits = nn.Parameter(torch.zeros(in_channels))
+            self.activation = nn.Sigmoid()
+        elif activation_gates == "relu":
+            self.gate_logits = nn.Parameter(torch.ones(in_channels))
+            self.activation = nn.ReLU()
+        
+        self.register_buffer('keep_indices', torch.arange(in_channels).long())
+    
+    def set_keep_indices(self, keep_ch_indices: torch.Tensor) -> None:
+        """Called by the pruning hook to permanently filter input channels.
+        
+        Args:
+            keep_ch_indices: 1D tensor of channel indices to keep from the
+                             full [B, 48, H, W] input.
+        """
+        self.register_buffer(
+            'keep_indices',
+            keep_ch_indices.clone().long()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C_in, N, D]
+        # x = x * self.gates.view(1, -1, 1, 1)  # Apply mask
+        # step 1: filter input channels
+        if self.keep_indices is not None:
+            x = x[:, self.keep_indices, :, :] # [B, num_kept, N, D]
+        # step 2: apply gates to remaining channels
+        soft = self.activation(self.gate_logits / (self.tau + 1e-8))
+        if not self.hardsoft_gates:
+            gates = soft
+            # Expand model-level gates to channel-level
+            if self.model_level:
+                gates = gates.repeat_interleave(self.ch_per_model)
+        else:
+            # soft = self.activation(self.gate_logits/(self.tau + 1e-8))
+            hard = (soft > self.hard_threshold).float()
+            # Keep min_alive to avoid setting all channels to 0
+            if self.group_pruning:
+                for i in range(self.num_models):
+                    g_ini = i*self.ch_per_model
+                    g_end = g_ini + self.ch_per_model
+                    group_soft = soft[g_ini:g_end]
+                    topk_idx = group_soft.detach().topk(self.min_alive).indices + g_ini
+                    # n_survive = int(hard[g_ini:g_end].sum().item())
+                    # if n_survive < self.min_alive:
+                    hard[topk_idx] = 1.0
+                # print(f"hard gates: {hard}")
+            else:
+                topk_idx = soft.detach().topk(self.min_alive).indices
+                if hard.detach().sum() < self.min_alive:
+                    hard[topk_idx] = 1.0
+            if self.greedy_pruning:
+                # gates = hard - soft.detach() + soft
+                # gates = hard * soft 
+                gates = hard.detach() * soft
+            else:
+                # gates = hard * soft 
+                # gates = hard * soft + soft - soft.detach()
+                gates = (hard * soft).detach() + soft - soft.detach()
+
+        x = x * gates.view(1, -1, 1, 1)  # Apply mask
+        return self.conv(x)
 
 
 class ComBoAdapter(BaseAdapter):
@@ -29,6 +132,8 @@ class ComBoAdapter(BaseAdapter):
         layer_drop_rate: float = 0.0,
         rescale_after_layer_drop: bool = True,
         layers_to_keep: Optional[List[int]] = None,
+        # Gating parameters
+        sigmoid_gates: bool = False,
         **kwargs,
     ):
         self.feat_transformer_embed_dim = embed_dim
@@ -41,6 +146,7 @@ class ComBoAdapter(BaseAdapter):
         self.layer_drop_rate = layer_drop_rate
         self.rescale_after_layer_drop = rescale_after_layer_drop
         self.layers_to_keep = layers_to_keep
+        self.sigmoid_gates = sigmoid_gates
 
         super().__init__(backbone, num_classes, freeze_backbone, **kwargs)
 
@@ -80,6 +186,11 @@ class ComBoAdapter(BaseAdapter):
             drop_path_rate=self.drop_path_rate,
             norm_layer=torch.nn.LayerNorm,
         )
+
+        if self.sigmoid_gates:
+            patch_embedding = self.feat_transformer.patch_embed
+            original_conv = self.feat_transformer.patch_embed.proj
+            patch_embedding.proj = MaskedConv2d(original_conv)
 
     def get_adapter_parameters(self) -> Dict[str, Any]:
         """Get parameters specific to this adapter for serialization."""
