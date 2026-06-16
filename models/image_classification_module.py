@@ -66,7 +66,7 @@ class ImageClassificationLightningModule(pl.LightningModule):
         self.criteria = pruning.get("criteria", "ratio")
         assert self.criteria in ['group', 'ratio', 'greedy'], "criteria must be one of ['group', 'ratio', 'greedy']"
         self.backbone_slices = {
-            "fm_0": slice(0, 12),
+            "backbone_0": slice(0, 12),
             "backbone_1": slice(12, 24),
             "backbone_2": slice(24, 36),
             "backbone_3": slice(36, 48),
