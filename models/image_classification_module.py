@@ -60,11 +60,12 @@ class ImageClassificationLightningModule(pl.LightningModule):
         self.output_path = output_dir / f'{dataset_name}_seed_{seed}.csv'
         self.warmup_iters = int(pruning.get("warmup_iters", 0.2) * config.training.max_steps)
         self.min_alive = pruning.get("min_alive", 4)
-        max_group = pruning.get("max_group", 1)
+        max_group = pruning.get("max_group", 0)
         self.ema_momentum = pruning.get("ema_momentum", 0.9)
         self.log_interval = int(pruning.get("log_interval", 5))
-        self.criteria = pruning.get("criteria", "ratio")
-        assert self.criteria in ['group', 'ratio', 'greedy'], "criteria must be one of ['group', 'ratio', 'greedy']"
+        self.criteria = pruning.get("criteria", None)
+        criteria_list = ['group', 'ratio', 'greedy', 'model']
+        assert self.criteria in criteria_list, f"criteria must be one of {criteria_list}"
         self.backbone_slices = {
             "backbone_0": slice(0, 12),
             "backbone_1": slice(12, 24),
@@ -255,7 +256,22 @@ class ImageClassificationLightningModule(pl.LightningModule):
                     remaining_slots[backbone_name] -= 1
                 if len(self.topk_idx) >= self.min_alive:
                     break
-                
+
+        if self.criteria == 'model':
+            # ratios = {}
+            # # Keep top-k channels per backbone group independently
+            # for name, slc in self.backbone_slices.items():
+            #     group_saliency = self.saliency_ema[slc].sum().item()
+            #     ratio          = group_saliency / (self.saliency_ema.sum().item() + 1e-40)
+            #     ratios[name] = ratio
+            _, ratio_list = self._compute_ratio_slots()
+            ratio_list = torch.tensor(ratio_list)
+            backbone_rank = torch.argsort(ratio_list, descending=True)
+            # Sort backbones by ratio
+            for idx in backbone_rank[:self.min_alive]:
+                slc=self.backbone_slices[f"backbone_{idx}"]
+                self.topk_idx.extend(range(slc.start, slc.stop))
+        
         elif self.criteria == 'greedy':
             top_idx = torch.argsort(self.saliency_ema, descending=True)
             self.topk_idx = top_idx[:self.min_alive].tolist()
@@ -269,11 +285,21 @@ class ImageClassificationLightningModule(pl.LightningModule):
         with torch.no_grad():
             self._conv.weight[:, self._prune_mask,:,:] = 0.0
 
+        optimizer = self.optimizers()
+        for group in optimizer.param_groups:
+            for p in group["params"]:
+                if p is self._conv.weight and p in optimizer.state:
+                    state = optimizer.state[p]
+                    if "exp_avg" in state:
+                        state["exp_avg"][:, self._prune_mask, :, :] = 0.0
+                    if "exp_avg_sq" in state:
+                        state["exp_avg_sq"][:, self._prune_mask, :, :] = 0.0
+
         def _zero_pruned_grads(grad):
             grad[:, self._prune_mask, :, :] = 0.0
             return grad
         self._conv.weight.register_hook(_zero_pruned_grads)
-        
+
         self.logger.experiment.log({
                 "pruning/topk": self.topk_idx})
         print(f"[INFO]: pruning/topk: {self.topk_idx}")
