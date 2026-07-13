@@ -1,4 +1,5 @@
 name: saliency
+criteria: ratio  # "group", "ratio", "greedy", "model"
 log_interval: 5
 output_path: outputs/pruning
 warmup_iters: 0.25

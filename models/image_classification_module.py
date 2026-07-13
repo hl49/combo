@@ -72,7 +72,7 @@ class ImageClassificationLightningModule(pl.LightningModule):
             "backbone_2": slice(24, 36),
             "backbone_3": slice(36, 48),
         }
-        self.slots = {f"backbone_{i}": max_group for i in range(len(self.backbone_slices.keys()))}
+        self.slots = {f"backbone_{i}": self.min_alive for i in range(len(self.backbone_slices.keys()))}
         self._pruned = False
         self.topk_idx=[]
 
@@ -83,14 +83,20 @@ class ImageClassificationLightningModule(pl.LightningModule):
         ch_in = self.model.feat_transformer.in_chans
         self.saliency_ema = torch.zeros(ch_in, dtype=torch.float64)
         self._captured_conv_grad = None
-        def _capture_conv_grad(grad):
-            self._captured_conv_grad = grad.detach().clone()
-        self._conv.weight.register_hook(_capture_conv_grad)
+        # def _capture_conv_grad(grad):
+        #     self._captured_conv_grad = grad.detach().clone()
+        # self._conv.weight.register_hook(_capture_conv_grad)
         # for name, module in self.model.feat_transformer.named_modules():
         #     if name.startswith("conv"):
         #         print(name, module)
         #         break
-        
+
+        if self.model.sigmoid_gates:
+            def _capture_gate_grad(grad):
+                self._captured_gate_grad = grad.detach().clone()
+            self._proj.gate_logits.register_hook(_capture_gate_grad)
+            self.gates_saliency_ema = torch.zeros(ch_in, dtype=torch.float64)
+
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.output_path, 'w') as f:
             f.write('iter,source,ch_idx,saliency,ema_saliency,grad_mag,weight_mag\n')
@@ -165,6 +171,15 @@ class ImageClassificationLightningModule(pl.LightningModule):
             #     self.ema_momentum * self.saliency_ema[finite_mask]
             #     + (1 - self.ema_momentum) * saliency[finite_mask]
             # )
+            if self.model.sigmoid_gates:
+                gl = self._proj.gate_logits.detach().clone().cpu().double()
+                ggl = self._proj.gate_logits.grad.detach().clone().cpu().double()
+                ggl = torch.nan_to_num(ggl, nan=0.0, posinf=0.0, neginf=0.0)
+                gates_saliency = (ggl * gl).pow(2)   # [48]
+                self.gates_saliency_ema = (
+                    self.ema_momentum * self.gates_saliency_ema
+                    + (1 - self.ema_momentum) * gates_saliency
+                )
         
         if self.global_step % self.log_interval == 0:
             # ema_log = {
@@ -192,6 +207,17 @@ class ImageClassificationLightningModule(pl.LightningModule):
                             f'{grad_mag[ch].item():.6e},'
                             f'{weight_mag[ch].item():.6e}\n'
                         )
+                    if self.model.sigmoid_gates:
+                        ggl_mag = ggl.pow(2)
+                        soft = torch.sigmoid(gl)
+                        for ch in range(len(self.gates_saliency_ema)):
+                            f.write(
+                                f'{self.global_step},gate,{ch},'
+                                f'{gates_saliency[ch].item():.6e},'
+                                f'{self.gates_saliency_ema[ch].item():.6e},'
+                                f'{ggl_mag[ch].item():.6e},'
+                                f'{soft[ch].item():.6e}\n'
+                            )
 
     def _compute_ratio_slots(self):
         """
@@ -254,8 +280,13 @@ class ImageClassificationLightningModule(pl.LightningModule):
                 if remaining_slots.get(backbone_name, 0) > 0:
                     self.topk_idx.append(ch.item())
                     remaining_slots[backbone_name] -= 1
-                if len(self.topk_idx) >= self.min_alive:
+                if self.criteria == 'group' and (len(self.topk_idx) >= self.min_alive*len(self.backbone_slices)):
                     break
+                
+                if self.criteria == 'ratio' and (len(self.topk_idx) >= self.min_alive):
+                    break
+                
+                # if len(self.topk_idx) >= self.min_alive*len(self.backbone_slices):
 
         if self.criteria == 'model':
             # ratios = {}
@@ -284,6 +315,9 @@ class ImageClassificationLightningModule(pl.LightningModule):
         # Set gates to 0
         with torch.no_grad():
             self._conv.weight[:, self._prune_mask,:,:] = 0.0
+            if self.model.sigmoid_gates:
+                self._proj.gate_logits[self._prune_mask] = -1e6   # large negative to zero out after sigmoid
+                self.gates_saliency_ema[self._prune_mask.cpu()] = 0.0
 
         optimizer = self.optimizers()
         for group in optimizer.param_groups:
@@ -294,11 +328,22 @@ class ImageClassificationLightningModule(pl.LightningModule):
                         state["exp_avg"][:, self._prune_mask, :, :] = 0.0
                     if "exp_avg_sq" in state:
                         state["exp_avg_sq"][:, self._prune_mask, :, :] = 0.0
+                if self.model.sigmoid_gates and p is self._proj.gate_logits and p in optimizer.state:
+                    state = optimizer.state[p]
+                    if "exp_avg" in state:
+                        state["exp_avg"][self._prune_mask] = 0.0
+                    if "exp_avg_sq" in state:
+                        state["exp_avg_sq"][self._prune_mask] = 0.0
 
         def _zero_pruned_grads(grad):
             grad[:, self._prune_mask, :, :] = 0.0
             return grad
         self._conv.weight.register_hook(_zero_pruned_grads)
+        if self.model.sigmoid_gates:
+            def _zero_pruned_gate_grads(grad):
+                grad[self._prune_mask] = 0.0
+                return grad
+            self._proj.gate_logits.register_hook(_zero_pruned_gate_grads)
 
         self.logger.experiment.log({
                 "pruning/topk": self.topk_idx})
